@@ -108,15 +108,13 @@ class Session:
     VERIFIED = "verified"
     WRONG    = "wrong"
     DONE     = "done"
-    PAUSED   = "paused"
 
     def __init__(self):
-        self.lock = threading.Lock()
         self.reset()
 
     def reset(self):
         self.current_index = 0
-        self.step_status   = self.PAUSED
+        self.step_status   = self.WAITING
         self.verify_time   = None
         self.results = [
             {"object": OBJECTS_TO_VERIFY[i], "display": DISPLAY_NAMES[i], "status": "pending"}
@@ -126,15 +124,6 @@ class Session:
         self.is_recording = False
         self.video_writer = None
         self.recording_filename = ""
-
-    def set_target(self, index):
-        """Set which object to detect next (user selects from list)."""
-        with self.lock:
-            if 0 <= index < len(OBJECTS_TO_VERIFY) and self.results[index]["status"] != "verified":
-                self.current_index = index
-                self.step_status = self.WAITING
-                self.verify_time = None
-                print(f"[Prevo Audit AI Agent] Target set to index {index}: {OBJECTS_TO_VERIFY[index]}")
 
     def start_recording(self):
         if self.is_recording:
@@ -164,22 +153,20 @@ class Session:
         return DISPLAY_NAMES[self.current_index]
 
     def advance(self):
-        """After verification, check completion or go to paused for next selection."""
-        if all(r["status"] == "verified" for r in self.results):
+        self.current_index += 1
+        if self.current_index >= len(OBJECTS_TO_VERIFY):
             self.complete    = True
             self.step_status = self.DONE
         else:
-            self.step_status = self.PAUSED
+            self.step_status = self.WAITING
             self.verify_time = None
 
-    def mark_verified(self, conf, target_index):
-        """Mark target_index as verified. Only succeeds if current_index matches."""
-        if self.step_status == self.WAITING and self.current_index == target_index:
+    def mark_verified(self, conf):
+        if self.step_status == self.WAITING:
             self.step_status = self.VERIFIED
             self.verify_time = time.time()
-            self.results[target_index]["status"]     = "verified"
-            self.results[target_index]["confidence"] = f"{conf:.0%}"
-            print(f"[Prevo Audit AI Agent] VERIFIED index {target_index}: {OBJECTS_TO_VERIFY[target_index]} ({conf:.0%})")
+            self.results[self.current_index]["status"]     = "verified"
+            self.results[self.current_index]["confidence"] = f"{conf:.0%}"
 
     def mark_wrong(self, detected):
         self.step_status = self.WRONG
@@ -193,6 +180,8 @@ def detect_and_annotate(frame, expected):
     top_label = None
     top_conf  = 0.0
     detections = []
+    frame_h, frame_w = frame.shape[:2]
+    frame_area = frame_w * frame_h
 
     for box in results.boxes:
         conf  = float(box.conf[0])
@@ -219,12 +208,10 @@ def detect_and_annotate(frame, expected):
                 top_conf  = best["conf"]
                 status = "wrong"
 
-    # Only draw bounding box for the expected/selected object
     for det in detections:
-        if det["label"] != expected:
-            continue
         x1, y1, x2, y2 = det["box"]
-        color = (50, 220, 100)
+        match = det["label"] == expected
+        color = (50, 220, 100) if match else (50, 80, 240)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         tag = f"{det['label']} {det['conf']:.0%}"
         (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -235,28 +222,21 @@ def detect_and_annotate(frame, expected):
     return frame, status, top_label, top_conf
 
 
-def _update_session(status, top_label, top_conf, expected, target_index):
-    """Update session state. Only verifies if expected object matches target_index."""
-    with session.lock:
-        if session.complete:
-            return
-        if session.step_status == Session.PAUSED:
-            return
-        # Double-check: only process if current_index still matches what we detected for
-        if session.current_index != target_index:
-            return
-        if session.step_status in [Session.WAITING, Session.WRONG]:
-            if status == "verified" and top_label == expected:
-                session.mark_verified(top_conf, target_index)
-                if top_conf >= INSTANT_VERIFY_THRESHOLD:
-                    session.advance()
-            elif status == "wrong":
-                session.mark_wrong(top_label or "")
-            elif status == "waiting" and session.step_status == Session.WRONG:
-                session.step_status = Session.WAITING
-        if session.step_status == Session.VERIFIED:
-            if time.time() - session.verify_time >= VERIFIED_HOLD_SECONDS:
+def _update_session(status, top_label, top_conf):
+    if session.complete:
+        return
+    if session.step_status in [Session.WAITING, Session.WRONG]:
+        if status == "verified":
+            session.mark_verified(top_conf)
+            if top_conf >= INSTANT_VERIFY_THRESHOLD:
                 session.advance()
+        elif status == "wrong":
+            session.mark_wrong(top_label or "")
+        elif status == "waiting" and session.step_status == Session.WRONG:
+            session.step_status = Session.WAITING
+    if session.step_status == Session.VERIFIED:
+        if time.time() - session.verify_time >= VERIFIED_HOLD_SECONDS:
+            session.advance()
 
 
 def mjpeg_generator():
@@ -267,12 +247,10 @@ def mjpeg_generator():
             if frame is None:
                 time.sleep(0.08)
                 continue
-            if not session.complete and session.step_status != Session.PAUSED:
-                with session.lock:
-                    expected = session.current_object
-                    target_index = session.current_index
+            if not session.complete:
+                expected = session.current_object
                 frame, status, top_label, top_conf = detect_and_annotate(frame, expected)
-                _update_session(status, top_label, top_conf, expected, target_index)
+                _update_session(status, top_label, top_conf)
                 if session.is_recording and session.video_writer:
                     rec_frame = cv2.resize(frame, (1280, 720))
                     session.video_writer.write(rec_frame)
@@ -327,16 +305,6 @@ def reset_session():
     return {"status": "ok"}
 
 
-class SetTargetRequest(BaseModel):
-    index: int
-
-
-@app.post("/set_target")
-def set_target_endpoint(request: SetTargetRequest):
-    session.set_target(request.index)
-    return {"status": "ok", "target_index": session.current_index}
-
-
 @app.post("/start_recording")
 def start_rec():
     session.start_recording()
@@ -386,12 +354,10 @@ async def detect_frame(request: FrameRequest):
         if frame is None:
             return Response(content=b"", status_code=400)
 
-        if not session.complete and session.step_status != Session.PAUSED:
-            with session.lock:
-                expected = session.current_object
-                target_index = session.current_index
+        if not session.complete:
+            expected = session.current_object
             frame, status, top_label, top_conf = detect_and_annotate(frame, expected)
-            _update_session(status, top_label, top_conf, expected, target_index)
+            _update_session(status, top_label, top_conf)
             if session.is_recording and session.video_writer:
                 rec_frame = cv2.resize(frame, (1280, 720))
                 session.video_writer.write(rec_frame)
