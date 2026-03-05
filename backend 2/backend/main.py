@@ -21,8 +21,27 @@ from ultralytics import YOLO
 RECORDINGS_DIR = Path("recordings")
 RECORDINGS_DIR.mkdir(exist_ok=True)
 
-OBJECTS_TO_VERIFY = ["cell phone", "laptop", "bottle"]
-DISPLAY_NAMES = ["Mobile Phone", "Laptop", "Bottle"]
+# All available objects the user can choose from (COCO label → display name)
+AVAILABLE_OBJECTS = {
+    "cell phone": "Mobile Phone",
+    "laptop": "Laptop",
+    "bottle": "Bottle",
+    "keyboard": "Keyboard",
+    "mouse": "Mouse",
+    "cup": "Cup",
+    "book": "Book",
+    "scissors": "Scissors",
+    "remote": "Remote",
+    "backpack": "Backpack",
+    "umbrella": "Umbrella",
+    "clock": "Clock",
+    "vase": "Vase",
+    "chair": "Chair",
+    "tv": "TV Monitor",
+}
+
+# Reverse mapping: display name → COCO label
+DISPLAY_TO_COCO = {v: k for k, v in AVAILABLE_OBJECTS.items()}
 
 CONFIDENCE_THRESHOLD = 0.70
 INSTANT_VERIFY_THRESHOLD = 0.90
@@ -107,23 +126,35 @@ class Session:
     WAITING  = "waiting"
     VERIFIED = "verified"
     WRONG    = "wrong"
+    IDLE     = "idle"       # No target selected yet
     DONE     = "done"
 
     def __init__(self):
         self.reset()
 
     def reset(self):
-        self.current_index = 0
-        self.step_status   = self.WAITING
-        self.verify_time   = None
-        self.results = [
-            {"object": OBJECTS_TO_VERIFY[i], "display": DISPLAY_NAMES[i], "status": "pending"}
-            for i in range(len(OBJECTS_TO_VERIFY))
-        ]
+        self.target_coco = None       # Current COCO label to detect (e.g. "bottle")
+        self.target_display = None    # Display name (e.g. "Bottle")
+        self.step_status = self.IDLE  # Start idle — wait for user to select
+        self.verify_time = None
+        self.detected_objects = []    # List of display names already detected
+        self.results = []             # Detection results for detected objects
         self.complete = False
         self.is_recording = False
         self.video_writer = None
         self.recording_filename = ""
+        self.total_required = len(AVAILABLE_OBJECTS)  # Total objects available
+
+    def set_target(self, display_name):
+        """Set the target object to detect (called when user selects from UI)."""
+        coco_label = DISPLAY_TO_COCO.get(display_name)
+        if not coco_label:
+            return False
+        self.target_coco = coco_label
+        self.target_display = display_name
+        self.step_status = self.WAITING
+        self.verify_time = None
+        return True
 
     def start_recording(self):
         if self.is_recording:
@@ -144,33 +175,39 @@ class Session:
             self.video_writer = None
         print(f"[Prevo Audit AI Agent] Recording saved: {self.recording_filename}")
 
-    @property
-    def current_object(self):
-        return OBJECTS_TO_VERIFY[self.current_index]
-
-    @property
-    def current_display(self):
-        return DISPLAY_NAMES[self.current_index]
-
-    def advance(self):
-        self.current_index += 1
-        if self.current_index >= len(OBJECTS_TO_VERIFY):
-            self.complete    = True
-            self.step_status = self.DONE
-        else:
-            self.step_status = self.WAITING
-            self.verify_time = None
-
     def mark_verified(self, conf):
-        if self.step_status == self.WAITING:
+        if self.step_status == self.WAITING and self.target_display:
             self.step_status = self.VERIFIED
             self.verify_time = time.time()
-            self.results[self.current_index]["status"]     = "verified"
-            self.results[self.current_index]["confidence"] = f"{conf:.0%}"
+            self.results.append({
+                "object": self.target_coco,
+                "display": self.target_display,
+                "status": "verified",
+                "confidence": f"{conf:.0%}",
+            })
+            self.detected_objects.append(self.target_display)
 
     def mark_wrong(self, detected):
         self.step_status = self.WRONG
-        self.results[self.current_index]["detected"] = detected
+
+    def finish_verification(self):
+        """Called after verified hold time. Go back to idle for next selection."""
+        self.target_coco = None
+        self.target_display = None
+        self.step_status = self.IDLE
+        self.verify_time = None
+        # Check if all available objects detected
+        if len(self.detected_objects) >= self.total_required:
+            self.complete = True
+            self.step_status = self.DONE
+
+    @property
+    def current_object(self):
+        return self.target_coco
+
+    @property
+    def current_display(self):
+        return self.target_display or ""
 
 session = Session()
 
@@ -180,8 +217,6 @@ def detect_and_annotate(frame, expected):
     top_label = None
     top_conf  = 0.0
     detections = []
-    frame_h, frame_w = frame.shape[:2]
-    frame_area = frame_w * frame_h
 
     for box in results.boxes:
         conf  = float(box.conf[0])
@@ -225,18 +260,20 @@ def detect_and_annotate(frame, expected):
 def _update_session(status, top_label, top_conf):
     if session.complete:
         return
+    if session.step_status == Session.IDLE:
+        return  # No target selected, skip
     if session.step_status in [Session.WAITING, Session.WRONG]:
         if status == "verified":
             session.mark_verified(top_conf)
             if top_conf >= INSTANT_VERIFY_THRESHOLD:
-                session.advance()
+                session.finish_verification()
         elif status == "wrong":
             session.mark_wrong(top_label or "")
         elif status == "waiting" and session.step_status == Session.WRONG:
             session.step_status = Session.WAITING
     if session.step_status == Session.VERIFIED:
         if time.time() - session.verify_time >= VERIFIED_HOLD_SECONDS:
-            session.advance()
+            session.finish_verification()
 
 
 def mjpeg_generator():
@@ -247,7 +284,7 @@ def mjpeg_generator():
             if frame is None:
                 time.sleep(0.08)
                 continue
-            if not session.complete:
+            if not session.complete and session.target_coco:
                 expected = session.current_object
                 frame, status, top_label, top_conf = detect_and_annotate(frame, expected)
                 _update_session(status, top_label, top_conf)
@@ -265,7 +302,7 @@ def mjpeg_generator():
         camera.remove_client()
 
 
-# ── FastAPI App ───────────────────────────────────────────────────────────
+# -- FastAPI App --
 
 app = FastAPI(title="Prevo Audit AI Agent - Object Verification System")
 
@@ -283,7 +320,7 @@ async def health():
     return {
         "status": "ok",
         "model": "YOLOv8n",
-        "objects": DISPLAY_NAMES,
+        "available_objects": list(AVAILABLE_OBJECTS.values()),
         "camera": "active" if camera.is_active else "standby",
         "confidence_threshold": CONFIDENCE_THRESHOLD,
     }
@@ -305,6 +342,17 @@ def reset_session():
     return {"status": "ok"}
 
 
+class SetTargetRequest(BaseModel):
+    display_name: str
+
+@app.post("/set_target")
+def set_target(request: SetTargetRequest):
+    ok = session.set_target(request.display_name)
+    if ok:
+        return {"status": "ok", "target": request.display_name}
+    return {"status": "error", "message": f"Unknown object: {request.display_name}"}
+
+
 @app.post("/start_recording")
 def start_rec():
     session.start_recording()
@@ -323,12 +371,13 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             payload = {
-                "current_index":  session.current_index,
-                "current_object": session.current_display if not session.complete else "",
-                "step_status":    session.step_status,
-                "complete":       session.complete,
-                "is_recording":   session.is_recording,
-                "results":        session.results,
+                "step_status":       session.step_status,
+                "target_display":    session.current_display,
+                "complete":          session.complete,
+                "is_recording":      session.is_recording,
+                "detected_objects":  session.detected_objects,
+                "results":           session.results,
+                "total_required":    session.total_required,
             }
             await ws.send_json(payload)
             await asyncio.sleep(0.3)
@@ -336,7 +385,7 @@ async def websocket_endpoint(ws: WebSocket):
         pass
 
 
-# ── Browser Camera Frame Detection ──────────────────────────────────────
+# -- Browser Camera Frame Detection --
 
 class FrameRequest(BaseModel):
     image: str
@@ -354,7 +403,7 @@ async def detect_frame(request: FrameRequest):
         if frame is None:
             return Response(content=b"", status_code=400)
 
-        if not session.complete:
+        if not session.complete and session.target_coco:
             expected = session.current_object
             frame, status, top_label, top_conf = detect_and_annotate(frame, expected)
             _update_session(status, top_label, top_conf)
@@ -369,7 +418,7 @@ async def detect_frame(request: FrameRequest):
         return Response(content=b"", status_code=500)
 
 
-# ── POST-based detection (backward compatible) ──────────────────────────
+# -- POST-based detection (backward compatible) --
 
 class DetectRequest(BaseModel):
     image: str
@@ -398,10 +447,7 @@ async def detect(request: DetectRequest):
             if conf < CONFIDENCE_THRESHOLD:
                 continue
             x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
-            display = label
-            if label == "cell phone": display = "Mobile Phone"
-            elif label == "laptop": display = "Laptop"
-            elif label == "bottle": display = "Bottle"
+            display = AVAILABLE_OBJECTS.get(label, label)
             detections.append({
                 "class_name": label,
                 "display_name": display,
