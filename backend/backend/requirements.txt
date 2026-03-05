@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────────────────────────
+#  Object Verification System — Dependencies
+#  FastAPI + YOLOv8 + OpenCV backend
+# ─────────────────────────────────────────────────────────────────
+
+# FastAPI web framework
+fastapi>=0.111.0
+
+# ASGI server (needed to run FastAPI)
+uvicorn[standard]>=0.29.0
+
+# WebSocket support for uvicorn
+websockets>=12.0
+
+# YOLOv8 (includes torch, torchvision automatically)
+ultralytics>=8.0.0
+
+# Computer vision
+opencv-python>=4.8.0
+
+# Numerical computing
+numpy>=1.24.0
+
+# Python multipart (for file uploads if needed)
+python-multipart>=0.0.9
