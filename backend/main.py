@@ -1,6 +1,6 @@
 """
 =============================================================================
- Prevo Audit AI Agent — Real-Time Object Verification System (FastAPI Backend)
+ TIN/PAN-FC Audit Automation — Real-Time Object Verification System (FastAPI Backend)
 =============================================================================
 """
 
@@ -23,21 +23,10 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 
 # All available objects the user can choose from (COCO label → display name)
 AVAILABLE_OBJECTS = {
+    "person": "Selfie",
     "cell phone": "Mobile Phone",
     "laptop": "Laptop",
     "bottle": "Bottle",
-    "keyboard": "Keyboard",
-    "mouse": "Mouse",
-    "cup": "Cup",
-    "book": "Book",
-    "scissors": "Scissors",
-    "remote": "Remote",
-    "backpack": "Backpack",
-    "umbrella": "Umbrella",
-    "clock": "Clock",
-    "vase": "Vase",
-    "chair": "Chair",
-    "tv": "TV Monitor",
 }
 
 # Reverse mapping: display name → COCO label
@@ -48,9 +37,9 @@ INSTANT_VERIFY_THRESHOLD = 0.90
 VERIFIED_HOLD_SECONDS = 2.5
 MODEL_PATH = "yolov8n.pt"
 
-print("[Prevo Audit AI Agent] Loading YOLOv8 model...")
+print("[TIN/PAN-FC Audit Automation] Loading YOLOv8 model...")
 model = YOLO(MODEL_PATH)
-print("[Prevo Audit AI Agent] Model ready.")
+print("[TIN/PAN-FC Audit Automation] Model ready.")
 
 
 class LazyCamera:
@@ -85,7 +74,7 @@ class LazyCamera:
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
-        print("[Prevo Audit AI Agent] Camera OPENED (client connected)")
+        print("[TIN/PAN-FC Audit Automation] Camera OPENED (client connected)")
 
     def _stop(self):
         self._running = False
@@ -94,12 +83,12 @@ class LazyCamera:
             self._thread = None
         with self.lock:
             self.frame = None
-        print("[Prevo Audit AI Agent] Camera CLOSED (no clients)")
+        print("[TIN/PAN-FC Audit Automation] Camera CLOSED (no clients)")
 
     def _capture_loop(self):
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            print("[Prevo Audit AI Agent] WARNING: No camera device found. Using browser camera mode.")
+            print("[TIN/PAN-FC Audit Automation] WARNING: No camera device found. Using browser camera mode.")
             self._running = False
             return
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -164,7 +153,7 @@ class Session:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         self.video_writer = cv2.VideoWriter(self.recording_filename, fourcc, 5.0, (1280, 720))
         self.is_recording = True
-        print(f"[Prevo Audit AI Agent] Recording started: {self.recording_filename}")
+        print(f"[TIN/PAN-FC Audit Automation] Recording started: {self.recording_filename}")
 
     def stop_recording(self):
         if not self.is_recording:
@@ -173,7 +162,7 @@ class Session:
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
-        print(f"[Prevo Audit AI Agent] Recording saved: {self.recording_filename}")
+        print(f"[TIN/PAN-FC Audit Automation] Recording saved: {self.recording_filename}")
 
     def mark_verified(self, conf):
         if self.step_status == self.WAITING and self.target_display:
@@ -222,7 +211,8 @@ def detect_and_annotate(frame, expected):
         conf  = float(box.conf[0])
         cls   = int(box.cls[0])
         label = model.names[cls]
-        if label == "person":
+        # Skip "person" unless we are looking for Selfie
+        if label == "person" and expected != "person":
             continue
         x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
         detections.append({"label": label, "conf": conf, "box": (x1, y1, x2, y2)})
@@ -304,7 +294,7 @@ def mjpeg_generator():
 
 # -- FastAPI App --
 
-app = FastAPI(title="Prevo Audit AI Agent - Object Verification System")
+app = FastAPI(title="TIN/PAN-FC Audit Automation - Object Verification System")
 
 app.add_middleware(
     CORSMiddleware,
@@ -414,7 +404,7 @@ async def detect_frame(request: FrameRequest):
         _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return Response(content=jpeg.tobytes(), media_type="image/jpeg")
     except Exception as e:
-        print(f"[Prevo Audit AI Agent] detect_frame error: {e}")
+        print(f"[TIN/PAN-FC Audit Automation] detect_frame error: {e}")
         return Response(content=b"", status_code=500)
 
 
@@ -442,8 +432,6 @@ async def detect(request: DetectRequest):
             conf  = float(box.conf[0])
             cls   = int(box.cls[0])
             label = model.names[cls]
-            if label == "person":
-                continue
             if conf < CONFIDENCE_THRESHOLD:
                 continue
             x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
@@ -457,11 +445,11 @@ async def detect(request: DetectRequest):
             })
         return {"detections": detections}
     except Exception as e:
-        print(f"[Prevo Audit AI Agent] Detection error: {e}")
+        print(f"[TIN/PAN-FC Audit Automation] Detection error: {e}")
         return {"detections": []}
 
 
 if __name__ == "__main__":
     import uvicorn
-    print("[Prevo Audit AI Agent] Starting server at http://localhost:8000")
+    print("[TIN/PAN-FC Audit Automation] Starting server at http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
