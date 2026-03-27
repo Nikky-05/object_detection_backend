@@ -449,6 +449,7 @@ async def detect(request: DetectRequest):
         return {"detections": []}
 
 
+
 if __name__ == "__main__":
     import uvicorn
     print("[Prevo Audit AI Agent] Starting server at http://localhost:8000")
